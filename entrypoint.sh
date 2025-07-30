@@ -17,6 +17,13 @@ function run_step() {
   if "$@"; then
     echo "OK"
   else
+    # Explicitly log the error if the command fails, as run_step suppresses default STDERR
+    # from the command itself, and we want to see the docker connection error.
+    local last_error_output=$(cat "${LAST_ERROR:-/dev/null}") # Capture last error if available
+    if [[ -n "${last_error_output}" ]]; then
+        log_error "${last_error_output}"
+    fi
+    log_error "FAILED: ${msg}"
     return $?
   fi
 }
@@ -40,14 +47,16 @@ function generate_secret_key() {
 
 function generate_certificate() {
   local -r STATE_DIR="${SHADOWBOX_DIR}/persisted-state"
-  readonly SB_CERTIFICATE_FILE="${STATE_DIR}/shadowbox-selfsigned.crt"
-  readonly SB_PRIVATE_KEY_FILE="${STATE_DIR}/shadowbox-selfsigned.key"
+  
+  # Removed 'readonly'
+  SB_CERTIFICATE_FILE="${STATE_DIR}/shadowbox-selfsigned.crt"
+  SB_PRIVATE_KEY_FILE="${STATE_DIR}/shadowbox-selfsigned.key"
   
   export SB_CERTIFICATE_FILE
   export SB_PRIVATE_KEY_FILE
 
   declare -a openssl_req_flags=(
-    -x509 -nodes -days 36500 -newkey rsa:4096
+    -x509 -nodes -days 36500 -newkey rsa:4096 # Corrected to 4096 if that was the intent
     -subj "/CN=${PUBLIC_HOSTNAME}"
     -keyout "${SB_PRIVATE_KEY_FILE}" -out "${SB_CERTIFICATE_FILE}"
   )
@@ -74,7 +83,7 @@ function join() {
 function write_config() {
   local -r STATE_DIR="${SHADOWBOX_DIR}/persisted-state"
   local -a config=()
-  if (( FLAGS_KEYS_PORT != 0 )); then
+  if (( ${FLAGS_KEYS_PORT:-0} != 0 )); then # Use default 0 if not set
     config+=("\"portForNewAccessKeys\": ${FLAGS_KEYS_PORT}")
   fi
   if [[ -n "${SB_DEFAULT_SERVER_NAME:-}" ]]; then
@@ -88,6 +97,13 @@ function write_config() {
 function start_shadowbox() {
   local -r STATE_DIR="${SHADOWBOX_DIR}/persisted-state"
   local -r START_SCRIPT="${STATE_DIR}/start_container.sh"
+
+  # Add a small delay and check docker info for debugging
+  echo "Checking Docker daemon connectivity..."
+  sleep 2 # Give Docker some time
+  docker info >/dev/null 2>&1 || { log_error "Docker daemon not accessible from inside container. Is it running on the host?"; return 1; }
+  echo "Docker daemon reachable."
+
   cat <<-EOF > "${START_SCRIPT}"
 # This script starts the Outline server container ("Shadowbox").
 # If you need to customize how the server is run, you can edit this script, then restart with:
@@ -146,6 +162,13 @@ function start_watchtower() {
   local -ir WATCHTOWER_REFRESH_SECONDS="${WATCHTOWER_REFRESH_SECONDS:-3600}"
   local -ar docker_watchtower_flags=(--name watchtower --log-driver local --restart always \
       -v /var/run/docker.sock:/var/run/docker.sock)
+
+  # Check Docker daemon connectivity before running watchtower
+  echo "Checking Docker daemon connectivity for Watchtower..."
+  sleep 2
+  docker info >/dev/null 2>&1 || { log_error "Docker daemon not accessible for Watchtower. Is it running on the host?"; return 1; }
+  echo "Docker daemon reachable for Watchtower."
+
   local STDERR_OUTPUT
   STDERR_OUTPUT="$(docker run -d "${docker_watchtower_flags[@]}" containrrr/watchtower --cleanup --label-enable --tlsverify --interval "${WATCHTOWER_REFRESH_SECONDS}" 2>&1 >/dev/null)" && return
   log_error "FAILED"
@@ -216,6 +239,19 @@ function escape_json_string() {
 
 # Main execution logic
 function main() {
+  # These files are used for detailed logging and last error capture.
+  # Their creation and removal are handled by the 'finish' trap in the original script.
+  # For a Docker entrypoint, these might not be strictly necessary, or
+  # you might want to adjust their lifecycle.
+  # For now, let's ensure they exist if needed by log_error
+  FULL_LOG="$(mktemp -t outline_logXXXXXXXXXX)"
+  LAST_ERROR="$(mktemp -t outline_last_errorXXXXXXXXXX)"
+  export FULL_LOG LAST_ERROR # Export so sub-functions can use them
+
+  # Re-implement a simplified 'finish' trap for debugging within the container
+  trap 'local exit_code=$?; if (( exit_code != 0 )); then if [[ -s "${LAST_ERROR}" ]]; then log_error "\nLast error: $(< "${LAST_ERROR}")" >&2; fi; log_error "Full log: ${FULL_LOG}" >&2; fi; rm -f "${FULL_LOG}" "${LAST_ERROR}";' EXIT
+
+
   echo "Starting Outline server setup..."
 
   # Define environment variables with defaults
@@ -248,6 +284,8 @@ function main() {
   run_step "Generating TLS certificate" generate_certificate
   run_step "Generating SHA-256 certificate fingerprint" generate_certificate_fingerprint
   run_step "Writing config" write_config
+  
+  # --- CRITICAL: Ensure Docker daemon is running on the HOST before this ---
   run_step "Starting Shadowbox" start_shadowbox
   run_step "Starting Watchtower" start_watchtower
 
