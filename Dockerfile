@@ -17,7 +17,8 @@ ENV SHADOWBOX_DIR="/opt/outline"
 ENV SB_IMAGE="quay.io/outline/shadowbox:stable"
 ENV WATCHTOWER_REFRESH_SECONDS="3600"
 ENV ACCESS_CONFIG="${SHADOWBOX_DIR}/access.txt"
-ENV SENTRY_LOG_FILE="" #SENTRY_LOG_FILE is typically not set in a Dockerfile as its for external logging during install.
+# SENTRY_LOG_FILE is typically not set in a Dockerfile as it's for external logging during install.
+ENV SENTRY_LOG_FILE=""
 
 # Expose the default API port and a common range for access keys.
 # Users should adjust these based on their actual configuration.
